@@ -196,7 +196,7 @@ TEST_CASE("empty input") {
  
     auto result = run(input);
 
-    REQUIRE(result.size() == 0);
+    REQUIRE(result.empty());
 }
 
 TEST_CASE("empty order") {

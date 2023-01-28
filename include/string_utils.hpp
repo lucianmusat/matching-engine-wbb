@@ -1,4 +1,4 @@
-#pragma onamespace 
+#pragma once
 
 #include <sstream>
 #include <iomanip>
@@ -8,7 +8,7 @@ namespace utils {
     inline bool isValidDouble(const std::string& str) {
         try {
             std::stod(str);     
-        } catch (std::invalid_argument) {
+        } catch (const std::invalid_argument&) {
             return false;
         }
         return true;
