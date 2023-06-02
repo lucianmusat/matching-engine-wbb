@@ -5,6 +5,7 @@
 #include <set>
 #include <memory>
 #include <map>
+#include <unordered_set>
 
 #include "order.hpp"
 
@@ -13,6 +14,9 @@ namespace engine {
     /*! \brief Struct that holds all the buy and sell orders for a particular symbol.
     *
     * Uses std::set instead of std::priority_queue here because the priority_queue lacks iteration.
+If you need a priority based data structure in an iterable format, you might also look at std::vector combined with make_heap
+std::vector based heap is many many times faster than std::set in many operations, though not necessarily in all.
+See https://en.cppreference.com/w/cpp/algorithm/make_heap
     */
     struct TradeNode {
         TradeNode() = default;
@@ -47,7 +51,7 @@ class MatchingEngine {
         // We could use unordered_map but it needs to be in alphabetical order
         std::map<std::string, std::unique_ptr<engine::TradeNode>> mClob {};
         std::vector<std::string> mListOfTrades {};
-        std::set<order::Id> mActiveOrderIds;
+        std::unordered_set<order::Id> mActiveOrderIds;
         
         /*! 
         *  \brief Add a buy or sell order in the market.
