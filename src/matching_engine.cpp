@@ -59,28 +59,20 @@ void MatchingEngine::addOrder(const std::string& symbol, Order order) {
 }
 
 void MatchingEngine::pullOrder(order::Id id) {
-    if (!mClob.empty()) {
-        for (auto& node: mClob) {
-            auto idsEqual = [&](Order order){
-                if (order.id == id) return true; 
-                return false;
-            };
-            // Look for the id in the buy orders
-            const auto& buy_trade_it = std::find_if(node.second->buy_orders.begin(),
-                                                    node.second->buy_orders.end(), idsEqual);
-            if (buy_trade_it != node.second->buy_orders.end()) {
-                node.second->buy_orders.erase(*buy_trade_it);
-                mActiveOrderIds.erase(buy_trade_it->id);
-                processCurrentOrders();
-                return;
-            }
-            // Look for the id in the sell orders
-            const auto& sell_trade_it = std::find_if(node.second->sell_orders.begin(),
-                                                     node.second->sell_orders.end(), idsEqual);
-            if (sell_trade_it != node.second->sell_orders.end()) {
-                node.second->buy_orders.erase(*sell_trade_it);
-                mActiveOrderIds.erase(sell_trade_it->id);
-                processCurrentOrders();
+    // If you maintain some mapping of orderID to store the map where the actual order is stored, you don't need these inefficient iterations
+    for (auto& [_, node]: mClob) {
+        auto idsEqual = [&](Order order){
+            return order.id == id;
+        };
+        // Removed duplicated code. Maybe there's a nicer way to do it than this for loop, but it at least deduplicates
+        // There was also a bug in the old code where you used either buy or sell orders in the wrong place. This fixes that
+        for (auto& orders : {&node->buy_orders, &node->sell_orders})
+        {
+            const auto& trade_it = std::find_if(orders->begin(), orders->end(), idsEqual);
+            if (trade_it != orders->end()) {
+                orders->erase(*trade_it);
+                mActiveOrderIds.erase(trade_it->id);
+                processCurrentOrders(); // Shouldn't be a need to rerun the orders right?
                 return;
             }
         }
@@ -88,75 +80,67 @@ void MatchingEngine::pullOrder(order::Id id) {
     throw std::runtime_error(std::string("Error: Cannot pull order #" + std::to_string(id)));
 }
 
+// There are multiple functions in this class, all with amend in their name. What distinguishes them? More explicit naming can help here
 bool MatchingEngine::amend(std::set<Order>& order_set, const std::string& symbol, order::Id id, double price, int volume) {
-    const auto& trade_it = std::find_if(order_set.begin(), 
-                                        order_set.end(), 
-                                        [&](Order order) {
-                                                            if (order.id == id) 
-                                                                return true; 
-                                                            return false;
-                                                        });
+    // You could inline this function using a similar tricks as above, iterating over the two different types of orders
+    const auto& trade_it = std::find_if(order_set.begin(), order_set.end(), [&](Order order) { return order.id == id; });
     if (trade_it != order_set.end()) {
-        auto old_id = trade_it->id;
-        auto old_side = trade_it->side;
-        auto old_timestamp = trade_it->timestamp;
-        if (trade_it->price == price && trade_it->volume > volume) {
-            order_set.erase(*trade_it);
-            addOrder(symbol, {old_id, old_side, price, volume, old_timestamp});
-        } else {
-            order_set.erase(*trade_it);
-            auto new_ts = std::chrono::system_clock::now().time_since_epoch().count();
-            addOrder(symbol, {old_id, old_side, price, volume, new_ts, new_ts});
+        auto new_trade_id = trade_it->id;
+        auto new_trade_side = trade_it->side;
+        auto new_trade_ts = trade_it->timestamp;
+        if (trade_it->price != price || trade_it->volume <= volume)
+        {
+            new_trade_ts = std::chrono::system_clock::now().time_since_epoch().count();
         }
+
+        order_set.erase(*trade_it);
+        // Why call this addOrder function here, while below in processCurrentOrders you update the order, then remove/reinsert in the set directly? Either could be fine, but not both
+        addOrder(symbol, {new_trade_id, new_trade_side, price, volume, new_trade_ts});
         return true;
     }
     return false;
 }
 
 void MatchingEngine::amendOrder(order::Id id, double price, int volume) {
-    if (!mClob.empty()) {
-        for (auto& node: mClob) {
-            if (!amend(node.second->buy_orders, node.first, id, price, volume) && 
-                !amend(node.second->sell_orders, node.first, id, price, volume)) {
-                    throw std::runtime_error(std::string("Error: Cannot amend order #" + std::to_string(id)));
-                }
-        }
+    for (auto& [symbol, node]: mClob) {
+        if (!amend(node->buy_orders, symbol, id, price, volume) &&
+            !amend(node->sell_orders, symbol, id, price, volume)) {
+                throw std::runtime_error(std::string("Error: Cannot amend order #" + std::to_string(id)));
+            }
     }
 }
 
 void MatchingEngine::processCurrentOrders() {
-    for (const auto& node: mClob) {
-        while (!node.second->buy_orders.empty() && !node.second->sell_orders.empty() && (
-               std::prev(node.second->buy_orders.end())->price >= node.second->sell_orders.begin()->price
-            )) {
-                const auto& buy_order = std::prev(node.second->buy_orders.end()); // Best bid
-                const auto& sell_order = node.second->sell_orders.begin(); // Lowest ask
-                order::Id agressive_order_id = sell_order->id;
-                order::Id passive_order_id = buy_order->id;
-                if (buy_order->last_updated > sell_order->last_updated) {
-                    std::swap(agressive_order_id, passive_order_id);
-                }
-                if (buy_order->volume == sell_order->volume) {
-                    node.second->buy_orders.erase(buy_order);
-                    node.second->sell_orders.erase(sell_order);
-                    addTradeToHistory(node.first, buy_order->price, sell_order->volume, agressive_order_id, passive_order_id);
-                } else if (buy_order->volume > sell_order->volume) {
-                    Order updated_buy_order(*buy_order);
-                    int stocks_exchanged = buy_order->volume - sell_order->volume;
-                    updated_buy_order.volume = stocks_exchanged;
-                    node.second->buy_orders.erase(buy_order);
-                    node.second->buy_orders.insert(updated_buy_order);
-                    node.second->sell_orders.erase(sell_order);
-                    addTradeToHistory(node.first, buy_order->price, sell_order->volume, agressive_order_id, passive_order_id);
-                } else {
-                    Order updated_sell_order(*sell_order);
-                    updated_sell_order.volume = sell_order->volume - buy_order->volume;
-                    node.second->sell_orders.erase(sell_order);
-                    node.second->sell_orders.insert(updated_sell_order);
-                    node.second->buy_orders.erase(buy_order);                   
-                    addTradeToHistory(node.first, buy_order->price, buy_order->volume, agressive_order_id, passive_order_id);
-                }
+    for (auto& [symbol, node]: mClob) {
+        while (!node->buy_orders.empty() && !node->sell_orders.empty()) {
+            const auto best_bid = std::prev(node->buy_orders.end());
+            const auto lowest_ask = node->sell_orders.begin();
+            if (best_bid->price < lowest_ask->price)
+                break;
+
+            order::Id agressive_order_id = lowest_ask->id;
+            order::Id passive_order_id = best_bid->id;
+            auto price_traded = best_bid->price; // This might have been a bug before? Price traded depends on which side is aggressive and which passive. I think I did this the right way around but it's late, you get the point
+            auto volume_traded = std::min(best_bid->volume, lowest_ask->volume);
+            if (best_bid->last_updated > lowest_ask->last_updated) {
+                std::swap(agressive_order_id, passive_order_id);
+                price_traded = lowest_ask->price;
             }
+
+            Order updated_best_bid(*best_bid);
+            Order updated_lowest_ask(*lowest_ask);
+            updated_best_bid.volume -= volume_traded;
+            updated_lowest_ask.volume -= volume_traded;
+
+            node->buy_orders.erase(best_bid);
+            node->sell_orders.erase(lowest_ask);
+            if (updated_best_bid.volume > 0)
+                node->buy_orders.insert(updated_best_bid);
+            if (updated_lowest_ask.volume > 0)
+                node->sell_orders.insert(updated_lowest_ask);
+
+            addTradeToHistory(symbol, price_traded, volume_traded, agressive_order_id, passive_order_id);
+        }
     }
 }
 
@@ -175,10 +159,10 @@ void MatchingEngine::addTradeToHistory(const std::string& symbol, double price, 
 
 std::vector<std::string> MatchingEngine::getFinalResult() {
     std::vector<std::string> result(mListOfTrades);
-    for (const auto& node: mClob) {
+    for (auto& [symbol, node]: mClob) {
         // Add separator
         std::string symbol_separator("===");
-        symbol_separator.append(node.first);
+        symbol_separator.append(symbol);
         symbol_separator.append("===");
         result.push_back(symbol_separator);
         
@@ -186,18 +170,13 @@ std::vector<std::string> MatchingEngine::getFinalResult() {
         std::map<double, int> remaining_sell_orders;
         std::map<double, int> remaining_buy_orders;
         std::string remaining_orders;
-        while (!node.second->buy_orders.empty() || !node.second->sell_orders.empty()) {
-            const auto& best_buy_order = node.second->buy_orders.end();
-            if (!node.second->buy_orders.empty()) {
-                const auto& next_buy_order = std::prev(best_buy_order);
-                remaining_buy_orders[next_buy_order->price] += next_buy_order->volume;
-                node.second->buy_orders.erase(next_buy_order);
-            }
-            if (node.second->sell_orders.size() >= 1) {
-                const auto& next_sell_order = node.second->sell_orders.begin();
-                remaining_sell_orders[next_sell_order->price] += next_sell_order->volume;
-                node.second->sell_orders.erase(next_sell_order);
-            }            
+        for (const auto& order: node->buy_orders)
+        {
+            remaining_buy_orders[order.price] += order.volume;
+        }
+        for (const auto& order: node->sell_orders)
+        {
+            remaining_sell_orders[order.price] += order.volume;
         }
         auto max_len = std::max(remaining_sell_orders.size(), remaining_buy_orders.size());
         for (auto i=0; i<max_len; i++) {
